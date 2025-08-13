@@ -1,0 +1,80 @@
+import os
+from typing import Optional
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from openai import OpenAI
+from dotenv import load_dotenv
+
+import os
+from typing import Optional
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from openai import OpenAI
+from dotenv import load_dotenv
+
+# .env 로드(로컬용). 컨테이너에선 docker-compose가 env를 주입함.
+load_dotenv()
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("환경변수 OPENAI_API_KEY가 필요합니다.")
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+app = FastAPI(title="AI Image Generate (DALL·E 3) & Describe")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
+
+class GenReq(BaseModel):
+    prompt: str
+    size: Optional[str] = "1024x1024"
+
+class DescReq(BaseModel):
+    image_url: str
+    style: Optional[str] = "detailed"
+
+@app.post("/generate")
+def generate(req: GenReq):
+    try:
+        allowed = {"1024x1024", "1024x1792", "1792x1024"}
+        size = req.size if req.size in allowed else "1024x1024"
+        out = client.images.generate(
+            model="dall-e-3",
+            prompt=req.prompt,
+            size=size,
+            response_format="url",
+        )
+        return {"image_url": out.data[0].url, "size": size}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"이미지 생성 실패: {e}")
+
+@app.post("/describe")
+def describe(req: DescReq):
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "당신은 이미지 설명 전문가입니다. 이미지를 보고 한국어로 자연스럽게 설명해 주세요."},
+                {"role": "user", "content": [
+                    {"type": "text", "text": (
+                        "이미지를 1~2문장으로 간결히 요약한 뒤, 배경/디테일을 자연스러운 한국어 문장으로 덧붙여 주세요."
+                    )},
+                    {"type": "image_url", "image_url": {"url": req.image_url}}
+                ]}
+            ],
+            temperature=0.6,
+        )
+        return {"analysis": resp.choices[0].message.content}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"이미지 설명 실패: {e}")
+
+# 컨테이너에선 uvicorn을 CMD에서 실행. 로컬 단독 실행도 지원.
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
